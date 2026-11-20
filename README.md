@@ -22,7 +22,8 @@ scraper/ ──► data/*.json ──► app/rag.py (BM25 + listing filters) ─
      clients get a challenge page. Rather than bypass it, I collected the public
      pages (home, about, every project and country listing, partner brands,
      hospitality, FAQ, contact, press) in a normal browser session and parsed the
-     HTML text into `data/darglobal.json`.
+     HTML text plus each page's `__NEXT_DATA__` into `data/darglobal.json`:
+     77 pages and 38 projects across the UAE, Oman, Qatar, Saudi Arabia, Spain and the UK.
 2. **Retrieval** (`app/rag.py`)
    - BM25 keyword index over chunked page text and one document per listing.
      It has no embedding model, so the container stays small and starts fast.
@@ -47,6 +48,12 @@ scraper/ ──► data/*.json ──► app/rag.py (BM25 + listing filters) ─
 | POST | `/api/chat` | `{"message": "...", "history": [...]}` → answer, sources, model |
 | GET | `/api/search?q=` | Retrieval debug view (no LLM call) |
 | GET | `/api/health` | Status and dataset stats |
+
+## Deployment
+
+It deploys as a Docker web service on Render (free tier) from this repo's
+`Dockerfile`. `OPENROUTER_API_KEY` is set as a secret environment variable.
+On the free tier, a sleeping instance takes about 50 s to wake on the first request.
 
 ## Run locally
 

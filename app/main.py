@@ -93,15 +93,17 @@ def build_context(r: dict) -> tuple[str, list[dict]]:
 async def ask_llm(messages: list[dict]) -> tuple[str, str]:
     if not API_KEY:
         raise HTTPException(503, "OPENROUTER_API_KEY is not configured on the server.")
-    payload = {"model": MODELS[0], "models": MODELS, "messages": messages, "temperature": 0.2, "max_tokens": 900}
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "HTTP-Referer": os.getenv("APP_URL", "https://huggingface.co/spaces"),
+        "HTTP-Referer": os.getenv("APP_URL", "https://github.com/Skshamim02/darglobal-wasalt-chatbot"),
         "X-Title": "DarGlobal Wasalt Assistant",
     }
     last_err = ""
     async with httpx.AsyncClient(timeout=90) as client:
-        for attempt in range(3):
+        for attempt in range(4):
+            # rotate the fallback list so each retry starts from a different free model
+            order = MODELS[attempt % len(MODELS):] + MODELS[: attempt % len(MODELS)]
+            payload = {"model": order[0], "models": order, "messages": messages, "temperature": 0.2, "max_tokens": 1200}
             resp = await client.post(OPENROUTER_URL, json=payload, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
@@ -114,7 +116,7 @@ async def ask_llm(messages: list[dict]) -> tuple[str, str]:
                 last_err = f"{resp.status_code}: {resp.text[:200]}"
                 if resp.status_code not in (429, 500, 502, 503, 504):
                     break
-            await asyncio.sleep(1.5 * (attempt + 1))
+            await asyncio.sleep(1.0)
     raise HTTPException(502, f"The language model is unavailable right now ({last_err}). Please retry.")
 
 

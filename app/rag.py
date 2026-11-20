@@ -242,6 +242,20 @@ class KnowledgeBase:
         if want_dg and not any(d.source == "DarGlobal" for d in chunks):
             extra = [self.docs[i] for s, i in scored if s > 0 and self.docs[i].source == "DarGlobal"][:3]
             chunks = extra + chunks[: max(0, k - len(extra))]
+        # pin overview pages that BM25 under-ranks (short pages / list-style text)
+        ql = q.lower()
+        pins = []
+        if want_dg or "project" in ql or "portfolio" in ql:
+            if re.search(r"project|portfolio|where|which|countr|location|dubai|uae|london|uk\b|spain|oman|qatar|saudi|jeddah|riyadh|muscat|doha", ql):
+                pins.append("/projects")
+        if re.search(r"contact|phone|call|email|office|address|reach|whatsapp|sales team", ql):
+            pins.append("/get-in-touch")
+        if re.search(r"investor|shares?|stock|revenue|profit|financial|listed|lse", ql):
+            pins.append("/investor")
+        for suffix in pins:
+            pd = [d for d in self.docs if d.source == "DarGlobal" and d.url.rstrip("/").endswith(suffix)]
+            chunks = pd[:3] + [d for d in chunks if d not in pd]
+        chunks = chunks[: k + 3]
         return {"filters": f, "listings": listings, "chunks": chunks}
 
     def stats(self) -> dict:
