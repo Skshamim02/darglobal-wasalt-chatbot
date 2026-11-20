@@ -115,9 +115,36 @@ def clean_listing(p: dict) -> dict:
         "verified": p.get("isVerified"),
         "rega_licensed": p.get("isRegaProp"),
         "updated": p.get("ageOfListing"),
+        "images": [
+            f"https://imagedelivery.net/1DNKFJPRaeUdy_j8F7HT3w/production/properties/{p.get('id')}/images/{n}/width=640,quality=70,format=auto"
+            for n in ((p.get("propertyFiles") or {}).get("images") or [])[:10]
+        ],
         "lat": (p.get("location") or {}).get("lat"),
         "lon": (p.get("location") or {}).get("lon"),
     }
+
+
+def pick_working_images(listings: list[dict]) -> None:
+    """Some file names in propertyFiles 404 on the image CDN (the site skips them too),
+    so keep the first photo that actually loads."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def first_ok(l: dict):
+        for u in l.pop("images", []) or []:
+            try:
+                r = session.get(u, timeout=10, stream=True)
+                ok = r.status_code == 200 and r.headers.get("content-type", "").startswith("image/")
+                r.close()
+                if ok:
+                    return u
+            except requests.RequestException:
+                pass
+        return None
+
+    with ThreadPoolExecutor(12) as ex:
+        for l, u in zip(listings, ex.map(first_ok, listings)):
+            l["image"] = u
+    print("  photos found for", sum(1 for l in listings if l["image"]), "of", len(listings))
 
 
 def main(pages_per_slug: int = 2) -> None:
@@ -179,6 +206,7 @@ def main(pages_per_slug: int = 2) -> None:
                     listings[p["id"]] = clean_listing(p)
         print("  total listings:", len(listings))
 
+    pick_working_images(list(listings.values()))
     (OUT / "wasalt_listings.json").write_text(json.dumps(list(listings.values()), ensure_ascii=False, indent=1), encoding="utf-8")
     (OUT / "wasalt_pages.json").write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"saved {len(listings)} listings, {len(pages)} pages")

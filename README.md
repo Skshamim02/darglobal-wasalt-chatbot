@@ -15,7 +15,7 @@ scraper/ ──► data/*.json ──► app/rag.py (BM25 + listing filters) ─
    - *Wasalt*: `scraper/scrape_wasalt.py` reads the Next.js `__NEXT_DATA__` JSON
      on the public SEO landing pages (e.g. `/en/properties-for-sale-in-riyadh`),
      so the fields come out structured (price, city, district, beds, area, rent
-     period). That gives about 970 listings across Riyadh, Jeddah, Dammam, Makkah
+     period). That gives about 970 listings (each with a verified working photo where one exists) across Riyadh, Jeddah, Dammam, Makkah
      and Madinah, plus the city guides, the About text and the FAQ. Requests are
      sent one per second and stay within robots.txt.
    - *DarGlobal*: the site sits behind Incapsula bot protection, so plain HTTP
@@ -39,6 +39,13 @@ scraper/ ──► data/*.json ──► app/rag.py (BM25 + listing filters) ─
    - Models are free OpenRouter models with automatic fallback:
      `google/gemma-4-31b-it:free → nvidia/nemotron-3.5-lightning:free → openrouter/free`.
    - The API is rate-limited per IP so the free quota isn't burned.
+
+## Interface
+
+The interface is a property-concierge chat UI with light and dark themes. Answers come with photo cards for matching Wasalt
+listings (price, beds, baths, area, link) and DarGlobal projects (brand partner, location, link), plus
+source chips. Wasalt photos go through a small allow-listed `/img` proxy; DarGlobal photos load
+directly from DarGlobal's CDN.
 
 ## API
 

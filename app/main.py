@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -23,7 +24,7 @@ API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 # Free models; OpenRouter tries them in order if one is rate-limited or down.
 MODELS = [m.strip() for m in os.getenv(
     "OPENROUTER_MODELS",
-    "google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free,openrouter/free",
+    "inclusionai/ling-3.2-flash:free,baidu/ernie-5.5-flash-preview:free,google/gemma-4-31b-it:free,openrouter/free",
 ).split(",") if m.strip()]
 
 kb = KnowledgeBase()
@@ -37,8 +38,8 @@ SYSTEM = """You are "Dar Assist", a property assistant answering ONLY from the s
 Rules:
 - Use only the CONTEXT below. If the answer isn't there, say you don't have that in the scraped data and suggest the official site. Never invent prices, dates, units or contact details.
 - Say which site a fact comes from (DarGlobal or Wasalt). Give prices with currency.
-- For listings, show a short markdown list: title, location, price, beds/size, and the link.
-- Be concise and friendly. Use markdown. Answer in the user's language (English or Arabic).
+- The interface automatically shows photo cards (with price, size and links) for the matching Wasalt listings and DarGlobal projects under your answer. So do NOT output markdown tables or raw listing URLs; give a short summary in bullet points (name, location, price, beds/size) and highlight what stands out. You may link to DarGlobal pages with markdown links.
+- Keep answers under about 220 words; no emojis or flag symbols. Be warm and professional, like a luxury real-estate concierge. Use markdown with bold for key facts. Answer in the user's language (English or Arabic).
 - Wasalt listings are a snapshot taken on {date}; mention that availability may have changed when relevant."""
 
 SCRAPED_ON = os.getenv("SCRAPED_ON", "20 Nov 2026")
@@ -90,6 +91,45 @@ def build_context(r: dict) -> tuple[str, list[dict]]:
     return "\n\n".join(parts), sources[:8]
 
 
+PROJECTS = json.loads((ROOT / "data" / "darglobal_projects.json").read_text(encoding="utf-8")) \
+    if (ROOT / "data" / "darglobal_projects.json").exists() else []
+LOC_WORDS = ["dubai", "rak", "marjan", "uae", "emirates", "oman", "muscat", "aida", "qatar", "doha", "simaisma",
+             "spain", "benahav", "marbella", "london", "uk", "jeddah", "riyadh", "saudi", "ksa", "rayana"]
+
+
+def project_cards(q: str, r: dict, limit: int = 8) -> list[dict]:
+    """DarGlobal project cards: by brand / location named in the question, else by retrieved pages."""
+    ql = q.lower()
+    if r["listings"] and not re.search(r"dar\s?global", ql):
+        return []
+    picked = []
+    for p in PROJECTS:
+        hay = f"{p['name']} {p['location']} {p.get('brand') or ''}".lower()
+        brand = (p.get("brand") or "").lower().replace("the ", "").split(" ")[0]
+        if brand and len(brand) > 2 and re.search(rf"\b{re.escape(brand)}", ql):
+            picked.append(p)
+        elif re.search(r"dar\s?global|project|develop|propert|villa|residen|tower", ql) and any(
+            re.search(rf"\b{w}\b", ql) and w in hay for w in LOC_WORDS
+        ):
+            picked.append(p)
+    if not picked:
+        urls = [d.url.rstrip("/") for d in r["chunks"] if d.source == "DarGlobal"]
+        for u in urls:
+            picked += [p for p in PROJECTS if p["url"].rstrip("/") == u and p not in picked]
+    seen, out = set(), []
+    for p in picked:
+        if p["url"] not in seen:
+            seen.add(p["url"])
+            out.append({"kind": "project", **p})
+    return out[:limit]
+
+
+def listing_cards(r: dict) -> list[dict]:
+    keep = ("title", "url", "purpose", "type", "city", "district", "price", "currency", "rent_frequency",
+            "bedrooms", "bathrooms", "built_up_area_sqm", "image", "updated")
+    return [{"kind": "listing", **{k: l.get(k) for k in keep}} for l in r["listings"][:8]]
+
+
 async def ask_llm(messages: list[dict]) -> tuple[str, str]:
     if not API_KEY:
         raise HTTPException(503, "OPENROUTER_API_KEY is not configured on the server.")
@@ -99,11 +139,11 @@ async def ask_llm(messages: list[dict]) -> tuple[str, str]:
         "X-Title": "DarGlobal Wasalt Assistant",
     }
     last_err = ""
-    async with httpx.AsyncClient(timeout=90) as client:
+    async with httpx.AsyncClient(timeout=45) as client:
         for attempt in range(4):
             # rotate the fallback list so each retry starts from a different free model
             order = MODELS[attempt % len(MODELS):] + MODELS[: attempt % len(MODELS)]
-            payload = {"model": order[0], "models": order, "messages": messages, "temperature": 0.2, "max_tokens": 1200}
+            payload = {"model": order[0], "models": order[:3], "messages": messages, "temperature": 0.2, "max_tokens": 1600}
             resp = await client.post(OPENROUTER_URL, json=payload, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
@@ -123,6 +163,30 @@ async def ask_llm(messages: list[dict]) -> tuple[str, str]:
 @app.get("/")
 def index():
     return FileResponse(ROOT / "static" / "index.html")
+
+
+# Image proxy for Wasalt listing photos (served through our origin so they load even where the
+# image CDN is blocked). Only Wasalt's image host is allowed.
+IMG_HOSTS = ("https://imagedelivery.net/1DNKFJPRaeUdy_j8F7HT3w/",)
+_img_cache: dict[str, tuple[bytes, str]] = {}
+
+
+@app.get("/img")
+async def img(u: str):
+    if not u.startswith(IMG_HOSTS) or len(u) > 400:
+        raise HTTPException(400, "host not allowed")
+    hit = _img_cache.get(u)
+    if not hit:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as c:
+            r = await c.get(u, headers={"Accept": "image/webp,image/jpeg,image/*"})
+        ctype = r.headers.get("content-type", "")
+        if r.status_code != 200 or not ctype.startswith("image/"):
+            raise HTTPException(404, "image unavailable")
+        hit = (r.content, ctype)
+        if len(_img_cache) > 400:
+            _img_cache.pop(next(iter(_img_cache)))
+        _img_cache[u] = hit
+    return Response(hit[0], media_type=hit[1], headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/api/health")
@@ -158,4 +222,13 @@ async def chat(body: ChatIn, request: Request):
             messages.append({"role": t.role, "content": t.content[:2000]})
     messages.append({"role": "user", "content": body.message})
     answer, model = await ask_llm(messages)
-    return {"answer": answer, "sources": sources, "model": model, "filters": r["filters"]}
+    cards = listing_cards(r) + project_cards(body.message, r)
+    return {"answer": answer, "sources": sources, "model": model, "filters": r["filters"], "cards": cards}
+
+
+@app.get("/api/stats")
+def stats():
+    s = kb.stats()
+    countries = sorted({p["location"].split(",")[-1].strip() for p in PROJECTS})
+    return {**s, "darglobal_projects": len(PROJECTS), "countries": countries,
+            "cities": len(s["listings_by_city"]), "scraped_on": SCRAPED_ON}
